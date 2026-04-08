@@ -1,8 +1,6 @@
 name: Smart Message Prioritization Environment
 version: 1.0.0
-description: |
-  Simulates a message inbox where an AI agent must classify messages by priority (high/medium/low)
-  and pin important ones to prevent them from being buried. Three tasks of increasing difficulty.
+description: AI agent learns to triage messages (high/medium/low priority) in a simulated inbox.
 action_space:
   type: object
   properties:
@@ -16,9 +14,4 @@ action_space:
       type: string
 observation_space:
   type: object
-  properties:
-    current_message: {type: object}
-    inbox_position: {type: integer}
-    total_messages: {type: integer}
-    pinned_high_priority_ids: {type: array}
 reward_range: [-1.0, 2.0]

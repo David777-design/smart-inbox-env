@@ -1,19 +1,6 @@
-# Virtual environments
 venv/
 .venv/
-env/
-
-# Python cache
 __pycache__/
 *.pyc
-*.pyo
-
-# Environment variables
 .env
-
-# IDE
-.vscode/
-.idea/
-
-# Logs
-*.log
+.DS_Store
