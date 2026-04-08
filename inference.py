@@ -1,95 +1,95 @@
-# inference.py
+import pickle
 import os
-import json
-import openai
-from environment import SmartInboxEnv, Action, Priority
-from tasks import load_task
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
+import numpy as np
+from typing import Optional
 
-def run_task(task_name: str) -> float:
-    # Check env vars here
-    API_BASE_URL = os.getenv("API_BASE_URL")
-    MODEL_NAME = os.getenv("MODEL_NAME")
-    HF_TOKEN = os.getenv("HF_TOKEN")
+app = FastAPI(title="Smart Inbox Inference Service", version="1.0.0")
 
-    if not all([API_BASE_URL, MODEL_NAME, HF_TOKEN]):
-        raise RuntimeError("Missing API_BASE_URL, MODEL_NAME, or HF_TOKEN")
+# Model loading
+model = None
+try:
+    # Try to load scikit-learn model
+    if os.path.exists('model.pkl'):
+        with open('model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        print("Loaded scikit-learn model from model.pkl")
+    # Try to load PyTorch model
+    elif os.path.exists('model.pt'):
+        import torch
+        model = torch.load('model.pt')
+        model.eval()
+        print("Loaded PyTorch model from model.pt")
+    # Try to load Hugging Face model
+    else:
+        from transformers import pipeline
+        model = pipeline("text-classification", model="distilbert-base-uncased-finetuned-sst-2-english")
+        print("Loaded default Hugging Face model")
+except Exception as e:
+    print(f"Could not load model: {e}")
+    model = None
 
-    openai.api_base = API_BASE_URL
-    openai.api_key = HF_TOKEN
+class PredictionRequest(BaseModel):
+    message: str
+    sender: Optional[str] = None
 
-    messages, grader, description, max_steps = load_task(task_name)
-    env = SmartInboxEnv(messages, max_steps)
-    obs = env.reset()
-    done = False
-    step = 0
+class PredictionResponse(BaseModel):
+    prediction: str
+    confidence: Optional[float] = None
 
-    while not done and step < max_steps:
-        # Build the prompt for the LLM
-        prompt = f"""
-You are an AI assistant managing a message inbox to prevent important messages from being buried.
+@app.get("/health")
+def health():
+    """Health check endpoint"""
+    return {"status": "healthy", "model_loaded": model is not None}
 
-Current message:
-- Sender: {obs.current_message.sender}
-- Content: {obs.current_message.content}
-- Position: {obs.inbox_position} of {obs.total_messages}
-- Already pinned high‑priority message IDs: {obs.pinned_high_priority_ids}
+@app.post("/predict", response_model=PredictionResponse)
+def predict(request: PredictionRequest):
+    """Predict message priority"""
+    if model is None:
+        # Fallback prediction based on keywords
+        text = request.message.lower()
+        if any(word in text for word in ['urgent', 'deadline', 'immediately', 'asap', 'critical']):
+            prediction = "high"
+        elif any(word in text for word in ['meeting', 'report', 'review', 'follow up']):
+            prediction = "medium"
+        else:
+            prediction = "low"
+        return PredictionResponse(prediction=prediction)
 
-Your job is to decide the priority (high, medium, low) for this message.
-If it is high priority, you should also consider pinning it (using the pin_message action after setting priority).
+    try:
+        # For scikit-learn model (assuming text classification)
+        if hasattr(model, 'predict'):
+            # Simple feature extraction (in real scenario, use proper preprocessing)
+            features = [len(request.message), request.message.count('!'), request.message.count('?')]
+            prediction = model.predict([features])[0]
+            return PredictionResponse(prediction=str(prediction))
 
-Return a JSON object with exactly one action.
-Possible actions:
-1. Set priority: {{"action_type": "set_priority", "priority": "high"}} (or "medium"/"low")
-2. Pin a message: {{"action_type": "pin_message", "message_id": "the_message_id"}}
-3. Move to next message: {{"action_type": "next"}}
+        # For Hugging Face pipeline
+        elif hasattr(model, 'predict') or callable(model):
+            result = model(request.message)
+            if isinstance(result, list) and result:
+                prediction = result[0]['label']
+                confidence = result[0]['score']
+                # Map to our priority levels
+                if 'POSITIVE' in prediction.upper():
+                    prediction = "high"
+                elif 'NEGATIVE' in prediction.upper():
+                    prediction = "low"
+                else:
+                    prediction = "medium"
+                return PredictionResponse(prediction=prediction, confidence=confidence)
 
-For this message, you should set its priority first, then optionally pin if it's high priority.
-You can also directly go to next without setting priority (penalized).
-Be efficient.
-"""
-        try:
-            completion = openai.ChatCompletion.create(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=150,
-                timeout=30
-            )
-            content = completion.choices[0].message.content.strip()
-            # Remove markdown code fences if present
-            if content.startswith("```json"):
-                content = content.split("```json")[1].split("```")[0]
-            elif content.startswith("```"):
-                content = content.split("```")[1].split("```")[0]
-            action_dict = json.loads(content)
-            action = Action(**action_dict)
-        except Exception as e:
-            print(f"Error: {e}, using fallback action (set_priority low)")
-            action = Action(action_type="set_priority", priority=Priority.LOW)
+        # For PyTorch model (assuming custom model)
+        else:
+            # This would need to be adapted based on actual model architecture
+            # For now, return fallback
+            return PredictionResponse(prediction="medium")
 
-        obs, reward, done, info = env.step(action)
-        step += 1
-        print(f"Step {step}: {action.action_type} -> reward {reward:.2f}")
-
-    score = grader(env.actions_taken, env.state())
-    return score
-
-def main():
-    scores = {}
-    for task in ["easy", "medium", "hard"]:
-        print(f"\n--- Running {task} task ---")
-        try:
-            s = run_task(task)
-            scores[task] = s
-            print(f"Score: {s:.2f}")
-        except Exception as e:
-            print(f"Error: {e}")
-            scores[task] = 0.0
-    return scores
+    except Exception as e:
+        print(f"Prediction error: {e}")
+        return PredictionResponse(prediction="low")
 
 if __name__ == "__main__":
-    scores = main()
-    print("\n=== BASELINE SCORES ===")
-    for task, s in scores.items():
-        print(f"{task}: {s:.2f}")
-    print("======================")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
